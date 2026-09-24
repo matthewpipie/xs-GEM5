@@ -37,6 +37,14 @@ void
 FetchTargetQueue::finishTarget(ThreadID tid)
 {
     queue[tid].fetchptr++;
+    queue[tid].pfptr = std::max(queue[tid].pfptr, queue[tid].fetchptr + 1);
+}
+
+void
+FetchTargetQueue::advancePrefetch(ThreadID tid)
+{
+    assert(hasPrefetchTarget(tid));
+    queue[tid].pfptr++;
 }
 
 void
@@ -53,6 +61,9 @@ FetchTargetQueue::squashAfter(FetchTargetId squashId, ThreadID tid)
         queue[tid].cap.pop_back();
     }
     queue[tid].fetchptr = squashId + 1;
+    // Every surviving target up to squashId is at or before fetchptr, so
+    // prefetching restarts right after the new fetching target.
+    queue[tid].pfptr = queue[tid].fetchptr + 1;
 }
 
 void
@@ -66,6 +77,7 @@ FetchTargetQueue::clear(ThreadID tid)
     queue[tid].cap.clear();
     queue[tid].baseTargetId = nextTargetId;
     queue[tid].fetchptr = nextTargetId;
+    queue[tid].pfptr = nextTargetId + 1;
 }
 
 

@@ -416,6 +416,21 @@ class DecoupledBPUWithBTB : public BPredUnit
     FetchTargetId ftqHeadId(ThreadID tid) const { assert(ftqHasFetching(tid)); return ftq.fetchId(tid); }
     const FetchTarget &ftqFetchingTarget(ThreadID tid) { assert(ftqHasFetching(tid)); return ftq.fetching(tid); }
 
+    // FDIP-facing interface: walk FTQ targets after the fetching target.
+    bool ftqHasPrefetchTarget(ThreadID tid) const { return ftq.hasPrefetchTarget(tid); }
+    FetchTargetId ftqPrefetchId(ThreadID tid) const { return ftq.prefetchId(tid); }
+    FetchTargetId ftqPrefetchDistance(ThreadID tid) const { return ftq.prefetchDistance(tid); }
+    const FetchTarget &ftqPrefetchTarget(ThreadID tid)
+    {
+        assert(ftqHasPrefetchTarget(tid));
+        return ftq.prefetchTarget(tid);
+    }
+    void ftqAdvancePrefetch(ThreadID tid) { ftq.advancePrefetch(tid); }
+    unsigned ftqPendingTargets(ThreadID tid) const
+    {
+        return ftqHasFetching(tid) ? ftq.backId(tid) + 1 - ftq.fetchId(tid) : 0;
+    }
+
     void dumpFsq(const char *when);
 
     // Dummy overriding

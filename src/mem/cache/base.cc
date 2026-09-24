@@ -3257,6 +3257,16 @@ BaseCache::CpuSidePort::tryTiming(PacketPtr pkt)
     }
     if (!cache->tryAccessTag(pkt)) {
         DPRINTF(TagReadFail, "tryAccessTag fails addr: %lx\n", pkt->getAddr());
+        // The LSQ replays on pkt->tagReadFail by itself. Instruction fetch
+        // follows the port protocol and waits for a retry, which must be
+        // sent or fetch deadlocks (tag ports are shared with prefetch issue).
+        if (pkt->req->isInstFetch()) {
+            if (sendRetryEvent.scheduled()) {
+                owner.reschedule(sendRetryEvent, cache->nextCycle());
+            } else {
+                owner.schedule(sendRetryEvent, cache->nextCycle());
+            }
+        }
         return false;
     }
     int sliceidx = cache->getSliceIdx(pkt->getAddr());

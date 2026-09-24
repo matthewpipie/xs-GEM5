@@ -37,7 +37,7 @@ SimObject('Prefetcher.py', sim_objects=[
     'SignaturePathPrefetcherV2', 'AccessMapPatternMatching', 'AMPMPrefetcher',
     'DeltaCorrelatingPredictionTables', 'DCPTPrefetcher',
     'IrregularStreamBufferPrefetcher', 'SlimAMPMPrefetcher',
-    'WorkerPrefetcher', 'DespacitoStreamPrefetcher',
+    'WorkerPrefetcher', 'DespacitoStreamPrefetcher', 'FDIPPrefetcher',
     'BOPPrefetcher', 'SBOOEPrefetcher', 'STeMSPrefetcher', 'PIFPrefetcher', 'IPCPrefetcher',
     'CompositeWithWorkerPrefetcher', 'L2CompositeWithWorkerPrefetcher', 'PrefetcherForwarder'])
 
@@ -51,6 +51,7 @@ DebugFlag('XsStreamPrefetcher')
 DebugFlag('BertiPrefetcher')
 DebugFlag('SPP')
 DebugFlag('WorkerPref')
+DebugFlag('FDIP')
 DebugFlag('IPCP')
 DebugFlag('CDPUseful')
 DebugFlag('CDPFilter')
@@ -88,5 +89,6 @@ Source('cmc.cc')
 Source('composite_with_worker.cc')
 Source('l2_composite_with_worker.cc')
 Source('despacito_stream.cc')
+Source('fdip.cc')
 Source('forwarder.cc')
 Source('prefetch_filter.cc')

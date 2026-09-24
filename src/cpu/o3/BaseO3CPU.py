@@ -128,6 +128,19 @@ class BaseO3CPU(BaseCPU):
     fetchQueueSize = Param.Unsigned(48, "Fetch queue size in micro-ops "
                                     "per-thread")
 
+    # Fetch-directed instruction prefetch (FDIP) of FTQ targets into the L1I
+    fdipEnable = Param.Bool(False, "Prefetch L1I lines of FTQ targets ahead "
+                            "of fetch (FDIP)")
+    fdipPrefetcher = Param.FDIPPrefetcher(NULL, "L1I FDIP prefetcher that "
+                                          "receives the line requests")
+    fdipDistance = Param.Unsigned(8, "Max FTQ targets the FDIP pointer runs "
+                                  "ahead of the fetching target")
+    fdipIssueWidth = Param.Unsigned(2, "Max FDIP line requests per cycle")
+    fdipMaxInflight = Param.Unsigned(8, "Max FDIP ITLB translations in "
+                                     "flight")
+    fdipFilterSize = Param.Unsigned(16, "Entries of the per-thread recently "
+                                    "requested line filter")
+
     renameToDecodeDelay = Param.Cycles(1, "Rename to decode delay")
     iewToDecodeDelay = Param.Cycles(1, "Issue/Execute/Writeback to decode "
                                     "delay")

@@ -53,6 +53,7 @@
 #include "config/the_isa.hh"
 #include "cpu/o3/comm.hh"
 #include "cpu/o3/dyn_inst_ptr.hh"
+#include "cpu/o3/fdip.hh"
 #include "cpu/o3/limits.hh"
 #include "cpu/pc_event.hh"
 #include "cpu/pred/bpred_unit.hh"
@@ -626,6 +627,9 @@ class Fetch
 
     branch_prediction::btb_pred::DecoupledBPUWithBTB *dbpbtb;
 
+    /** FTQ-driven L1I prefetch (FDIP) generator, null when disabled */
+    std::unique_ptr<FDIPGenerator> fdip;
+
     /** Maximum number of resolve entries buffered in fetch before training. */
     const unsigned resolveQueueSize;
 
@@ -1126,6 +1130,8 @@ class Fetch
         statistics::Distribution resolveEnqueueCount;
         /** Stat for entry occupancy distribution of the resolve queue. */
         statistics::Distribution resolveQueueOccupancy;
+        /** FTQ targets after the fetching one, per cycle waiting on I-cache */
+        statistics::Distribution ftqTargetsAheadWhileWaiting;
 
         // Trace metadata accounting (trace mode)
         /** Number of stored trace metadata records (seqNum -> traceInst). */

@@ -377,6 +377,21 @@ class WorkerPrefetcher(QueuedPrefetcher):
     prefetch_on_pf_hit = True
     use_virtual_addresses = True
 
+class FDIPPrefetcher(QueuedPrefetcher):
+    type = 'FDIPPrefetcher'
+    cxx_class = 'gem5::prefetch::FDIPPrefetcher'
+    cxx_header = "mem/cache/prefetch/fdip.hh"
+
+    # Line requests are pushed by the O3 fetch stage from the FTQ with
+    # physical addresses; the prefetcher never trains on cache accesses.
+    on_inst = False
+    on_data = False
+    prefetch_on_access = False
+    prefetch_on_pf_hit = False
+    use_virtual_addresses = False
+    queue_squash = False
+    queue_size = 16
+
 class StridePrefetcher(QueuedPrefetcher):
     type = 'StridePrefetcher'
     cxx_class = 'gem5::prefetch::Stride'

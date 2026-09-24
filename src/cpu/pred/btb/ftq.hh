@@ -28,6 +28,10 @@ class FetchTargetQueue
         std::deque<FetchTarget> cap;
         FetchTargetId baseTargetId = 1;
         FetchTargetId fetchptr = 1;
+        // Next target to be considered for instruction prefetch (FDIP).
+        // Invariant: pfptr >= fetchptr + 1, i.e. the target currently being
+        // fetched is never prefetched, the demand path already requests it.
+        FetchTargetId pfptr = 2;
     } queue[MaxThreads];
 
     uint32_t roundRobinPtr = 0;
@@ -74,6 +78,17 @@ public:
         return true;
     }
     inline uint32_t size(ThreadID tid) const { return queue[tid].cap.size(); }
+
+    // FDIP prefetch pointer accessors
+    inline FetchTargetId prefetchId(ThreadID tid) const { return queue[tid].pfptr; }
+    inline bool hasPrefetchTarget(ThreadID tid) const { return hasTarget(queue[tid].pfptr, tid); }
+    inline FetchTarget& prefetchTarget(ThreadID tid) { return get(queue[tid].pfptr, tid); }
+    // Number of targets between the fetching target and the prefetch pointer
+    inline FetchTargetId prefetchDistance(ThreadID tid) const
+    {
+        return queue[tid].pfptr - queue[tid].fetchptr;
+    }
+    void advancePrefetch(ThreadID tid);
 
     int getTargetTid();
     void insert(FetchTarget& target);

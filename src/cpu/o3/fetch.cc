@@ -147,6 +147,11 @@ Fetch::Fetch(CPU *_cpu, const BaseO3CPUParams &params)
     assert(dbpbtb);
     dbpbtb->setCpu(_cpu);
 
+    if (params.fdipEnable) {
+        fdip = std::make_unique<FDIPGenerator>(
+            _cpu, params, dbpbtb, cacheBlkSize, fetchBufferSize, &fetchStats);
+    }
+
     assert(params.decoder.size());
     for (ThreadID tid = 0; tid < numThreads; tid++) {
         decoder[tid] = params.decoder[tid];
@@ -287,6 +292,9 @@ Fetch::FetchStatGroup::FetchStatGroup(CPU *cpu, Fetch *fetch)
              "Number of times an entry is enqueued to the resolve queue"),
     ADD_STAT(resolveQueueOccupancy, statistics::units::Count::get(),
              "Number of entries in the resolve queue"),
+    ADD_STAT(ftqTargetsAheadWhileWaiting, statistics::units::Count::get(),
+             "FTQ targets after the fetching target, sampled each cycle a "
+             "thread waits on the I-cache"),
     ADD_STAT(traceMetaStores, statistics::units::Count::get(),
              "Number of stored trace metadata records (seqNum -> traceInst)"),
     ADD_STAT(traceMetaCleanupSquashCalls, statistics::units::Count::get(),
@@ -380,6 +388,8 @@ Fetch::FetchStatGroup::FetchStatGroup(CPU *cpu, Fetch *fetch)
             .init(1, 8, 1);
         resolveQueueOccupancy
             .init(0, 32, 1);
+        ftqTargetsAheadWhileWaiting
+            .init(0, 64, 4);
         traceMetaStores
             .prereq(traceMetaStores);
         traceMetaCleanupSquashCalls
@@ -778,6 +788,13 @@ Fetch::isDrained() const
         if (fetchStatus[i] != Idle) {
             return false;
         }
+    }
+
+    /* FDIP prefetch translations still in flight would enqueue
+     * prefetches after the drain completed.
+     */
+    if (fdip && !fdip->isDrained()) {
+        return false;
     }
 
     /* The pipeline might start up again in the middle of the drain
@@ -1215,6 +1232,10 @@ Fetch::doSquash(PCStateBase &new_pc, const DynInstPtr squashInst, const InstSeqN
     threads[tid].valid = false;
     ftqEntryFetchedInsts[tid] = 0;
 
+    if (fdip) {
+        fdip->squash(tid);
+    }
+
     if (traceFetch) {
         traceFetch->handleTraceSquash(tid, new_pc, squashInst, seqNum);
     }
@@ -1316,6 +1337,13 @@ Fetch::tick()
 
     // Perform fetch operations and instruction delivery
     fetchAndProcessInstructions(status_change);
+
+    // Prefetch lines of FTQ targets ahead of fetch, after demand fetch has
+    // had its chance to use the I-cache this cycle
+    if (fdip && !isTraceMode()) {
+        fdip->tick(*activeThreads);
+    }
+
 }
 
 bool
@@ -1330,6 +1358,16 @@ Fetch::initializeTickState()
 
     // get the distribution of fetch status
     fetchStats.fetchStatusDist[fetchStatus[0]]++;
+
+    // Prefetch opportunity: FTQ targets available while fetch waits on the
+    // I-cache, sampled at the same point as fetchStatusDist
+    for (ThreadID tid : *activeThreads) {
+        if (fetchStatus[tid] == WaitingCache) {
+            const unsigned pending = dbpbtb->ftqPendingTargets(tid);
+            fetchStats.ftqTargetsAheadWhileWaiting.sample(
+                pending > 0 ? pending - 1 : 0);
+        }
+    }
 
     // Check signal updates for all active threads
     while (threads != end) {
@@ -1799,6 +1837,10 @@ Fetch::handleDecodeSquash(ThreadID tid)
                 fromDecode->decodeInfo[tid].branchTaken,
                 mispred_inst->seqNum, tid, mispred_inst->getLoopIteration(),
                 false);
+            // The FTQ was squashed even if doSquash is skipped below
+            if (fdip) {
+                fdip->squash(tid);
+            }
         } else {
             warn("Unexpected non-control squash from decode.\n");
         }

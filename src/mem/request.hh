@@ -85,6 +85,7 @@ enum PrefetchSourceType
     CDP,
     SOpt,
     DespacitoStream,
+    FDIP,
     NUM_PF_SOURCES
 };
 
