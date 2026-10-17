@@ -141,6 +141,16 @@ class BaseO3CPU(BaseCPU):
     fdipFilterSize = Param.Unsigned(16, "Entries of the per-thread recently "
                                     "requested line filter")
 
+    # Committed-only shadow L1I (off-path pollution study). Measurement-only
+    # functional model owned by the CPU and fed the committed instruction
+    # stream from commit. Sized by scalar geometry params (no BaseCache handle)
+    # that must match the L1I; the block size is the system cache line size.
+    l1i_shadow_enable = Param.Bool(False,
+        "Enable the committed-only shadow L1I measurement model")
+    l1i_shadow_num_sets = Param.Unsigned(256,
+        "Shadow L1I number of sets (size / assoc / block)")
+    l1i_shadow_assoc = Param.Unsigned(4, "Shadow L1I associativity")
+
     renameToDecodeDelay = Param.Cycles(1, "Rename to decode delay")
     iewToDecodeDelay = Param.Cycles(1, "Issue/Execute/Writeback to decode "
                                     "delay")

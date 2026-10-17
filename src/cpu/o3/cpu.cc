@@ -141,6 +141,14 @@ CPU::CPU(const BaseO3CPUParams &params)
         _status = SwitchedOut;
     }
 
+    // Committed-only shadow L1I (off-path pollution study). Stats nest under
+    // this CPU (system.cpu.shadowL1I.*). Constructed only when enabled.
+    if (params.l1i_shadow_enable) {
+        shadowL1I = std::make_unique<ShadowL1I>(
+            this, params.numThreads, params.l1i_shadow_num_sets,
+            params.l1i_shadow_assoc, cacheLineSize());
+    }
+
     if (params.checker) {
         BaseCPU *temp_checker = params.checker;
         checker = dynamic_cast<Checker<DynInstPtr> *>(temp_checker);
@@ -1358,6 +1366,24 @@ CPU::addInst(const DynInstPtr &inst)
     instList.push_back(inst);
 
     return --(instList.end());
+}
+
+void
+CPU::shadowCommitInst(const DynInstPtr &inst)
+{
+    if (!shadowL1I) {
+        return;
+    }
+    // Count instructions with the committedInsts rule
+    // (Commit::updateComInstStats and instDone) so shadowMpki is comparable
+    // with the real L1I MPKI. Every committed op still probes its line.
+    unsigned num_insts = 0;
+    if (!inst->isNop() && !inst->isInstPrefetch() &&
+        (!inst->isMicroop() || inst->isLastMicroop())) {
+        num_insts = inst->staticInst->isFusion() ? 2 : 1;
+    }
+    shadowL1I->commitInst(inst->threadNumber, inst->seqNum,
+                          inst->shadowFetchLines, num_insts);
 }
 
 void

@@ -926,6 +926,10 @@ Decode::checkAndFuseInsts(std::vector<DynInstPtr> &vec, DynInstPtr& cur)
     instruction->setTid(inst_pair[1]->threadNumber);
     instruction->thread = inst_pair[1]->thread;
     instruction->setFtqId(inst_pair[1]->ftqId);
+    // The fused inst covers the bytes of both insts, so it takes over the
+    // I-cache lines (and real L1I misses) of both for the shadow L1I
+    instruction->shadowFetchLines = inst_pair[0]->shadowFetchLines;
+    instruction->addShadowFetchLines(inst_pair[1]->shadowFetchLines);
 
     instruction->instListIt = cpu->instList.insert(inst_pair[0]->instListIt, instruction);
     cpu->instList.erase(inst_pair[0]->instListIt);

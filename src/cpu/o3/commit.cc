@@ -1355,6 +1355,11 @@ Commit::commitInsts()
                         }
                         dbbtb->notifyInstCommit(head_inst);
                     }
+
+                    // Committed-only shadow L1I (off-path pollution study),
+                    // measurement-only. No-op unless enabled.
+                    cpu->shadowCommitInst(head_inst);
+
                         if (traceMaybeExitOnLastTraceInst(head_inst)) {
                             return;
                         }

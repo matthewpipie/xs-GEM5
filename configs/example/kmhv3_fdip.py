@@ -195,6 +195,8 @@ def setKmhV3Params(args, system, fdip_args):  # FDIP: extra fdip_args
             cpu.dcache.simulate_dcache_refill = True
             cpu.dcache.prefetch_can_offload = False
             set_lsq_bank_conflict_cache_params(cpu, system)
+            # Committed-only shadow L1I, off unless --shadow-l1i
+            set_shadow_l1i_params(args, system, cpu)
 
             # FDIP: attach the L1I FDIP prefetcher and enable FDIP in fetch
             if not fdip_args.no_fdip:

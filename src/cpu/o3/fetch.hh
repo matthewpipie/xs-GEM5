@@ -41,6 +41,7 @@
 #ifndef __CPU_O3_FETCH_HH__
 #define __CPU_O3_FETCH_HH__
 
+#include <array>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -532,6 +533,51 @@ class Fetch
     DynInstPtr buildInst(ThreadID tid, StaticInstPtr staticInst,
             StaticInstPtr curMacroop, const PCStateBase &this_pc,
             const PCStateBase &next_pc, bool trace);
+
+    /**
+     * Shadow L1I: the lines of the fill in a thread's fetch buffer, the
+     * real L1I outcome of each, and the ops built from it.
+     */
+    struct ShadowFill
+    {
+        struct Line
+        {
+            /** Line-aligned virtual address, MaxAddr if invalid */
+            Addr vaddr = MaxAddr;
+            /** Line-aligned physical address */
+            Addr paddr = MaxAddr;
+            /** The real L1I demand-missed on this line */
+            bool miss = false;
+            /** That miss merged into an in-flight MSHR */
+            bool mshrMerge = false;
+            /** A built op has bytes in this line */
+            bool used = false;
+            /** The miss was handed to a built op */
+            bool stamped = false;
+        };
+        std::array<Line, 2> lines;
+        /** Sequence numbers of the first and last op built, 0 if none */
+        InstSeqNum firstSeq = 0;
+        InstSeqNum lastSeq = 0;
+    };
+    ShadowFill shadowFill[MaxThreads];
+
+    /** Shadow L1I: record the lines of a completed fill. */
+    void recordShadowFill(ThreadID tid, PacketPtr first_pkt,
+                          PacketPtr second_pkt);
+
+    /**
+     * Shadow L1I: give an op its fetch lines. The first op with bytes in a
+     * missed line carries that miss.
+     */
+    void stampShadowFetchLines(ThreadID tid, const DynInstPtr &inst,
+                               const PCStateBase &pc);
+
+    /**
+     * Shadow L1I: the fill in the fetch buffer will supply no more ops.
+     * Report a missed line that no op used, then drop the fill.
+     */
+    void retireShadowFill(ThreadID tid);
 
     /** Pipeline the next I-cache access to the current one. */
     void pipelineIcacheAccesses(ThreadID tid);

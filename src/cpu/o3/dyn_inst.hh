@@ -74,6 +74,7 @@
 #include "debug/HtmCpu.hh"
 #include "debug/LoadPipeline.hh"
 #include "debug/RiscvMisc.hh"
+#include "mem/cache/shadow_l1i.hh"
 #include "sim/cur_tick.hh"
 
 namespace gem5
@@ -425,6 +426,12 @@ class DynInst : public ExecContext, public RefCounted
     std::unique_ptr<PCStateBase> predPC;
 
     Addr fallThruPC;
+
+    /**
+     * Shadow L1I: the I-cache lines this op was fetched from and the real
+     * L1I outcome of each. Only filled when the shadow L1I is enabled.
+     */
+    ShadowL1I::FetchLines shadowFetchLines;
 
     /** ftqId is used for squashing and committing */
     /** The fetch stream queue ID of the instruction. */
@@ -1680,6 +1687,31 @@ class DynInst : public ExecContext, public RefCounted
     getFtqId()
     {
         return ftqId;
+    }
+
+    /**
+     * Shadow L1I: add another op's fetch lines (e.g. for a fused op),
+     * merging the real L1I outcome of a line this op already has.
+     */
+    void
+    addShadowFetchLines(const ShadowL1I::FetchLines &lines)
+    {
+        for (const auto &line : lines) {
+            if (line.paddr == MaxAddr) {
+                continue;
+            }
+            for (auto &own : shadowFetchLines) {
+                if (own.paddr == MaxAddr) {
+                    own = line;
+                    break;
+                }
+                if (own.paddr == line.paddr) {
+                    own.miss |= line.miss;
+                    own.mshrMerge |= line.mshrMerge;
+                    break;
+                }
+            }
+        }
     }
 
     void

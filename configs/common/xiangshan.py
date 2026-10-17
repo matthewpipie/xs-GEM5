@@ -318,6 +318,24 @@ def get_xiangshan_cpu_class(args: argparse.Namespace):
     return XiangshanCore
 
 
+def set_shadow_l1i_params(args: argparse.Namespace, system, cpu):
+    """Size the committed-only shadow L1I (--shadow-l1i) like cpu.icache.
+
+    Call after the icache size and associativity are final. The block size is
+    the system cache line size, in the shadow as in the real cache.
+    """
+    if not args.shadow_l1i:
+        return
+    if not hasattr(cpu, 'icache'):
+        fatal("--shadow-l1i needs a classic L1 I-cache (--caches)")
+    size = int(cpu.icache.size)
+    assoc = int(cpu.icache.assoc)
+    blk = int(system.cache_line_size)
+    cpu.l1i_shadow_enable = True
+    cpu.l1i_shadow_assoc = assoc
+    cpu.l1i_shadow_num_sets = size // (assoc * blk)
+
+
 def config_xiangshan_inputs(args: argparse.Namespace, sys):
     ref_so = None
 
@@ -886,6 +904,13 @@ def xiangshan_system_init():
         action="store_true",
         default=False,
         help="Disable direction TAGE sources in kmhv3 and force MGSC standalone SC prediction",
+    )
+    parser.add_argument(
+        "--shadow-l1i",
+        action="store_true",
+        default=False,
+        help="Enable the committed-only shadow L1I model to measure off-path "
+             "(wrong-path) fetch and prefetch pollution of the L1 I-cache",
     )
 
     # Add the ruby specific and protocol specific args

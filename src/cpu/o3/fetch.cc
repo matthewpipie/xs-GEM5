@@ -485,6 +485,7 @@ Fetch::clearStates(ThreadID tid)
     macroop[tid] = NULL;
     delayedCommit[tid] = false;
     threads[tid].cacheReq.reset();
+    shadowFill[tid] = ShadowFill();
     threads[tid].reset();
     fetchQueue[tid].clear();
 
@@ -513,6 +514,7 @@ Fetch::resetStage()
 
         delayedCommit[tid] = false;
         threads[tid].cacheReq.reset();
+        shadowFill[tid] = ShadowFill();
 
         threads[tid].reset();
         ftqEntryFetchedInsts[tid] = 0;
@@ -543,6 +545,11 @@ Fetch::handleMultiCacheLineFetch(Addr vaddr, ThreadID tid, Addr pc)
     DPRINTF(Fetch, "[tid:%i] Handling multi-cacheline fetch for addr %#x, pc=%#lx\n", tid, vaddr, pc);
     // Transition to WaitingCache state when initiating cache access
     setThreadStatus(tid, WaitingCache);
+
+    // The previous fill supplies no more ops
+    if (cpu->isShadowL1IEnabled()) {
+        retireShadowFill(tid);
+    }
 
     // Reset cache request state for this thread
     threads[tid].cacheReq.reset();
@@ -681,6 +688,10 @@ Fetch::processMultiCacheLineCompletion(ThreadID tid, PacketPtr pkt)
     }
 
     assert(firstPkt && secondPkt);
+
+    if (cpu->isShadowL1IEnabled()) {
+        recordShadowFill(tid, firstPkt, secondPkt);
+    }
 
     // Copy merged data directly into fetchBuffer
     memcpy(threads[tid].data, firstPkt->getConstPtr<uint8_t>(), firstPkt->getSize());
@@ -1193,6 +1204,10 @@ Fetch::doSquash(PCStateBase &new_pc, const DynInstPtr squashInst, const InstSeqN
     threads[tid].cacheReq.cancelAllRequests();
     DPRINTF(Fetch, "[tid:%i] Squash: cancelled all cache requests, status: %s\n",
             tid, threads[tid].cacheReq.getStatusSummary().c_str());
+
+    if (cpu->isShadowL1IEnabled()) {
+        retireShadowFill(tid);
+    }
 
     // Reset the cache request after cancelling
     threads[tid].cacheReq.reset();
@@ -1898,6 +1913,10 @@ Fetch::buildInst(ThreadID tid, StaticInstPtr staticInst,
             instruction->seqNum, dbpbtb->ftqHeadId(tid));
     instruction->setFtqId(dbpbtb->ftqHeadId(tid));
 
+    if (cpu->isShadowL1IEnabled()) {
+        stampShadowFetchLines(tid, instruction, this_pc);
+    }
+
 #if TRACING_ON
     if (trace) {
         instruction->traceData =
@@ -1926,6 +1945,74 @@ Fetch::buildInst(ThreadID tid, StaticInstPtr staticInst,
     instruction->fallThruPC = this_pc.getFallThruPC();
 
     return instruction;
+}
+
+void
+Fetch::recordShadowFill(ThreadID tid, PacketPtr first_pkt,
+                        PacketPtr second_pkt)
+{
+    const Addr blk_mask = ~Addr(cacheBlkSize - 1);
+    auto &fill = shadowFill[tid];
+    fill = ShadowFill();
+    for (int i = 0; i < 2; i++) {
+        const PacketPtr pkt = i == 0 ? first_pkt : second_pkt;
+        auto &line = fill.lines[i];
+        line.vaddr = pkt->req->getVaddr() & blk_mask;
+        line.paddr = pkt->req->getPaddr() & blk_mask;
+        // Each cache level that misses bumps the request's access depth, and
+        // the L1I is the first level, so any depth means an L1I demand miss
+        line.miss = pkt->req->getAccessDepth() > 0;
+        line.mshrMerge = pkt->missOnLatePf || pkt->coalescingMSHR;
+    }
+}
+
+void
+Fetch::stampShadowFetchLines(ThreadID tid, const DynInstPtr &inst,
+                             const PCStateBase &pc)
+{
+    const Addr blk_mask = ~Addr(cacheBlkSize - 1);
+    auto &fill = shadowFill[tid];
+    if (fill.firstSeq == 0) {
+        fill.firstSeq = inst->seqNum;
+    }
+    fill.lastSeq = inst->seqNum;
+
+    // An op can straddle into the next line
+    const Addr first_line = pc.instAddr() & blk_mask;
+    const Addr last_line = (pc.getFallThruPC() - 1) & blk_mask;
+    unsigned n = 0;
+    for (Addr vline = first_line; vline <= last_line; vline += cacheBlkSize) {
+        for (auto &line : fill.lines) {
+            if (line.vaddr != vline) {
+                continue;
+            }
+            auto &own = inst->shadowFetchLines[n++];
+            own.paddr = line.paddr;
+            line.used = true;
+            if (line.miss && !line.stamped) {
+                own.miss = true;
+                own.mshrMerge = line.mshrMerge;
+                line.stamped = true;
+            }
+            break;
+        }
+    }
+}
+
+void
+Fetch::retireShadowFill(ThreadID tid)
+{
+    auto &fill = shadowFill[tid];
+    // Without ops the fill is on no path that can commit
+    if (fill.firstSeq != 0) {
+        for (const auto &line : fill.lines) {
+            if (line.vaddr != MaxAddr && line.miss && !line.used) {
+                cpu->getShadowL1I()->unusedLineMiss(
+                    tid, fill.firstSeq, fill.lastSeq, line.mshrMerge);
+            }
+        }
+    }
+    fill = ShadowFill();
 }
 
 bool

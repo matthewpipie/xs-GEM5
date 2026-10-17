@@ -73,6 +73,7 @@
 #include "cpu/timebuf.hh"
 #include "cpu/valuepred/valuepred_unit.hh"
 #include "mem/cache/prefetch/base.hh"
+#include "mem/cache/shadow_l1i.hh"
 #include "params/BaseO3CPU.hh"
 #include "sim/process.hh"
 #include "sim/rolling.hh"
@@ -750,6 +751,25 @@ class CPU : public BaseCPU
     bool isValuePredictorEnabled() const { return valuePred != nullptr; }
 
     valuepred::VPUnit *getValuePredictor() const { return valuePred; }
+
+  private:
+    /**
+     * Committed-only shadow L1I (off-path pollution study), null unless
+     * l1i_shadow_enable is set. Strictly measurement-only.
+     */
+    std::unique_ptr<ShadowL1I> shadowL1I;
+
+  public:
+    bool isShadowL1IEnabled() const { return shadowL1I != nullptr; }
+
+    /** The shadow L1I, null unless enabled */
+    ShadowL1I *getShadowL1I() const { return shadowL1I.get(); }
+
+    /**
+     * Feed one committed instruction's fetch lines to the shadow L1I.
+     * No-op unless the shadow is enabled.
+     */
+    void shadowCommitInst(const DynInstPtr &inst);
 };
 
 } // namespace o3
