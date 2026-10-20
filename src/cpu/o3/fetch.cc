@@ -1977,13 +1977,17 @@ Fetch::stampShadowFetchLines(ThreadID tid, const DynInstPtr &inst,
     }
     fill.lastSeq = inst->seqNum;
 
-    // An op can straddle into the next line
-    const Addr first_line = pc.instAddr() & blk_mask;
-    const Addr last_line = (pc.getFallThruPC() - 1) & blk_mask;
+    // An op can straddle into the next line. A wrong-path PC can sit in the
+    // last line of the address space, where the op's end wraps around to 0.
+    const Addr start = pc.instAddr();
+    const Addr end = pc.getFallThruPC() - 1;
+    const std::array<Addr, 2> vlines = {start & blk_mask, end & blk_mask};
+    const unsigned num_vlines =
+        end > start && vlines[1] != vlines[0] ? 2 : 1;
     unsigned n = 0;
-    for (Addr vline = first_line; vline <= last_line; vline += cacheBlkSize) {
+    for (unsigned i = 0; i < num_vlines; i++) {
         for (auto &line : fill.lines) {
-            if (line.vaddr != vline) {
+            if (line.vaddr != vlines[i]) {
                 continue;
             }
             auto &own = inst->shadowFetchLines[n++];
