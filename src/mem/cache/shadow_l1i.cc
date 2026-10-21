@@ -23,7 +23,8 @@ ShadowL1I::ShadowL1I(statistics::Group *parent, unsigned num_threads,
       sets(num_sets),
       lastBlockAddr(num_threads, MaxAddr),
       lastCommitSeq(num_threads, 0),
-      pendingUnused(num_threads),
+      pendingFills(num_threads),
+      lastNoted(num_threads, 0),
       ADD_STAT(shadowInsts, statistics::units::Count::get(),
                "Committed instructions observed by the shadow L1I"),
       ADD_STAT(shadowAccesses, statistics::units::Count::get(),
@@ -50,7 +51,18 @@ ShadowL1I::ShadowL1I(statistics::Group *parent, unsigned num_threads,
                "L1I"),
       ADD_STAT(unusedLineMisses, statistics::units::Count::get(),
                "Real L1I demand misses on fetched lines no op used, in fills "
-               "with committed ops")
+               "with committed ops"),
+      ADD_STAT(prefetchHitFillers, statistics::units::Count::get(),
+               "onPathPrefetchHits by what brought the line into the L1I"),
+      ADD_STAT(inherentMergeFillers, statistics::units::Count::get(),
+               "onPathInherentMisses merged into an in-flight MSHR, by what "
+               "started the fill"),
+      ADD_STAT(fillsUsed, statistics::units::Count::get(),
+               "Lines filled off the committed path whose first committed "
+               "use was a hit"),
+      ADD_STAT(fillsUsedLate, statistics::units::Count::get(),
+               "Lines filled off the committed path whose first committed "
+               "use merged into the fill in flight")
 {
     fatal_if(num_sets == 0 || assoc == 0 || !isPowerOf2(blk_size),
              "Shadow L1I needs sets > 0, assoc > 0 and a power-of-2 block "
@@ -66,6 +78,22 @@ ShadowL1I::ShadowL1I(statistics::Group *parent, unsigned num_threads,
             .subname(MshrMerge, "mshrMerge")
             .flags(statistics::total);
     }
+    for (auto *vec : {&prefetchHitFillers, &inherentMergeFillers}) {
+        vec->init(NumSources)
+            .subname(OffPath, "offPath")
+            .subname(UnusedLine, "unusedLine")
+            .subname(Fdip, "fdip")
+            .subname(OnPath, "onPath")
+            .subname(Unknown, "unknown")
+            .flags(statistics::total);
+    }
+    for (auto *vec : {&fillsUsed, &fillsUsedLate}) {
+        vec->init(NumFillSources)
+            .subname(OffPath, "offPath")
+            .subname(UnusedLine, "unusedLine")
+            .subname(Fdip, "fdip")
+            .flags(statistics::total);
+    }
 }
 
 void
@@ -73,7 +101,7 @@ ShadowL1I::commitInst(ThreadID tid, InstSeqNum seq, const FetchLines &lines,
                       unsigned num_insts)
 {
     shadowInsts += num_insts;
-    creditUnusedLineMisses(tid, seq);
+    resolveFills(tid, seq);
 
     if (lines[0].paddr == MaxAddr) {
         shadowNoPAddr++;
@@ -87,31 +115,88 @@ ShadowL1I::commitInst(ThreadID tid, InstSeqNum seq, const FetchLines &lines,
 }
 
 void
-ShadowL1I::unusedLineMiss(ThreadID tid, InstSeqNum first_seq,
-                          InstSeqNum last_seq, bool mshr_merge)
+ShadowL1I::retireFill(ThreadID tid, InstSeqNum first_seq,
+                      InstSeqNum last_seq,
+                      const std::array<RetiredLine, 2> &lines)
 {
+    for (const auto &line : lines) {
+        // A primary miss is the request that filled the line
+        if (line.id != 0 && line.miss && !line.mshrMerge) {
+            lineRecords[line.id].used = line.used;
+        }
+    }
+    const PendingFill fill{first_seq, last_seq, lines};
     // When the fill retires, its ops are the youngest the thread has built,
     // so any committed op at or after first_seq belongs to this fill.
     if (lastCommitSeq[tid] >= first_seq) {
-        unusedLineMisses[missKind(mshr_merge)]++;
-        return;
+        commitFill(fill);
+    } else {
+        pendingFills[tid].push_back(fill);
     }
-    pendingUnused[tid].push_back({first_seq, last_seq, mshr_merge});
 }
 
 void
-ShadowL1I::creditUnusedLineMisses(ThreadID tid, InstSeqNum seq)
+ShadowL1I::resolveFills(ThreadID tid, InstSeqNum seq)
 {
     lastCommitSeq[tid] = seq;
     // Ops commit in sequence order, so the first commit at or after a fill's
     // first op decides it: inside the fill means the fill was on the
     // committed path, past it means every op of the fill was squashed.
-    auto &pending = pendingUnused[tid];
+    auto &pending = pendingFills[tid];
     while (!pending.empty() && pending.front().firstSeq <= seq) {
         if (seq <= pending.front().lastSeq) {
-            unusedLineMisses[missKind(pending.front().mshrMerge)]++;
+            commitFill(pending.front());
         }
         pending.pop_front();
+    }
+}
+
+void
+ShadowL1I::commitFill(const PendingFill &fill)
+{
+    for (const auto &line : fill.lines) {
+        if (line.miss && !line.used) {
+            unusedLineMisses[missKind(line.mshrMerge)]++;
+        }
+        auto it = lineRecords.find(line.id);
+        if (it != lineRecords.end()) {
+            it->second.committedFill = true;
+        }
+    }
+}
+
+ShadowL1I::Source
+ShadowL1I::source(uint64_t id) const
+{
+    if (id == 0) {
+        return Unknown;
+    }
+    if (id & PrefetchFillBit) {
+        return Fdip;
+    }
+    auto it = lineRecords.find(id);
+    // No record: the fetch was squashed before its data reached fetch
+    if (it == lineRecords.end() || !it->second.committedFill) {
+        return OffPath;
+    }
+    if (!it->second.used) {
+        return UnusedLine;
+    }
+    // Used only by ops that were squashed, e.g. after a mispredict inside
+    // the fill
+    return it->second.committedUse ? OnPath : OffPath;
+}
+
+void
+ShadowL1I::noteUse(ThreadID tid, uint64_t id, bool late)
+{
+    if (id == lastNoted[tid]) {
+        return;
+    }
+    lastNoted[tid] = id;
+    const Source src = source(id);
+    if (src < NumFillSources && usedFills.insert(id).second) {
+        (late ? fillsUsedLate : fillsUsed)[src]++;
     }
 }
 
@@ -128,6 +213,7 @@ ShadowL1I::accessLine(ThreadID tid, const FetchLine &line)
         shadow_hit = probe(blk_addr);
         if (!shadow_hit && !line.miss) {
             onPathPrefetchHits++;
+            prefetchHitFillers[source(line.filler)]++;
         }
     }
 
@@ -135,7 +221,19 @@ ShadowL1I::accessLine(ThreadID tid, const FetchLine &line)
         auto &bucket =
             shadow_hit ? onPathPollutionMisses : onPathInherentMisses;
         bucket[missKind(line.mshrMerge)]++;
+        if (line.mshrMerge && !shadow_hit) {
+            inherentMergeFillers[source(line.filler)]++;
+        }
+        if (!line.mshrMerge) {
+            // This op's own request filled the line
+            auto it = lineRecords.find(line.filler);
+            if (it != lineRecords.end()) {
+                it->second.committedUse = true;
+            }
+            return;
+        }
     }
+    noteUse(tid, line.filler, line.miss);
 }
 
 bool

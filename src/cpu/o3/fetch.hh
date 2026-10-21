@@ -554,6 +554,10 @@ class Fetch
             bool used = false;
             /** The miss was handed to a built op */
             bool stamped = false;
+            /** Fill id of this line's request */
+            uint64_t id = 0;
+            /** Fill id of the request that brought the line in */
+            uint64_t filler = 0;
         };
         std::array<Line, 2> lines;
         /** Sequence numbers of the first and last op built, 0 if none */
@@ -561,6 +565,9 @@ class Fetch
         InstSeqNum lastSeq = 0;
     };
     ShadowFill shadowFill[MaxThreads];
+
+    /** Shadow L1I: fill ids handed out to line requests so far */
+    uint64_t shadowFillCount = 0;
 
     /** Shadow L1I: record the lines of a completed fill. */
     void recordShadowFill(ThreadID tid, PacketPtr first_pkt,

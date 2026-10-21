@@ -541,6 +541,11 @@ BaseCache::handleTimingReqMiss(PacketPtr pkt, MSHR *mshr, CacheBlk *blk,
 
                 assert(pkt->req->requestorId() < system->maxRequestors());
                 stats.cmdStats(pkt).mshrHits[pkt->req->requestorId()]++;
+                // Shadow L1I: report which request started the fill
+                if (pkt->req->isInstFetch() && mshr->getTarget()->pkt) {
+                    pkt->shadowFiller =
+                        mshr->getTarget()->pkt->req->getShadowFillId();
+                }
                 if (!mshr->hasFromCPU() && mshr->hasFromPref() &&  // and from cpu
                     (pkt->cmd != MemCmd::HardPFReq)) {
                     pkt->missOnLatePf = true;
@@ -718,6 +723,11 @@ BaseCache::recvTimingReq(PacketPtr pkt)
         // to the write buffer to ensure they logically precede anything
         // happening below
         doWritebacks(writebacks, clockEdge(lat + forwardLatency));
+    }
+
+    // Shadow L1I: report which request filled the line a fetch hit
+    if (satisfied && blk && pkt->req->isInstFetch()) {
+        pkt->shadowFiller = blk->getShadowFillId();
     }
 
     if (!satisfied && forceHit && !pkt->req->isInstFetch() && pkt->isRead() && pkt->req->hasPC() &&
@@ -972,6 +982,10 @@ BaseCache::recvTimingResp(PacketPtr pkt)
         }
         blk = handleFill(pkt, blk, writebacks, allocate);
         assert(blk != nullptr);
+        // Shadow L1I: remember which request filled the line
+        if (initial_tgt->pkt) {
+            blk->setShadowFillId(initial_tgt->pkt->req->getShadowFillId());
+        }
         ppFill->notify(pkt);
     }
 

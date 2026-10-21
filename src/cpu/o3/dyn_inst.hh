@@ -1708,6 +1708,9 @@ class DynInst : public ExecContext, public RefCounted
                 if (own.paddr == line.paddr) {
                     own.miss |= line.miss;
                     own.mshrMerge |= line.mshrMerge;
+                    if (own.filler == 0) {
+                        own.filler = line.filler;
+                    }
                     break;
                 }
             }

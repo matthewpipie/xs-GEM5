@@ -191,6 +191,7 @@ class CacheBlk : public TaggedEntry
         setRefCount(other.getRefCount());
         setDemandHits(other.getDemandHits());
         setSrcRequestorId(other.getSrcRequestorId());
+        setShadowFillId(other.getShadowFillId());
         std::swap(lockList, other.lockList);
 
         other.invalidate();
@@ -211,6 +212,7 @@ class CacheBlk : public TaggedEntry
         clearCoherenceBits(AllBits);
 
         setTaskId(context_switch_task_id::Unknown);
+        setShadowFillId(0);
         this->_xsMeta.invalidate();
         setWhenReady(MaxTick);
         setRefCount(0);
@@ -324,6 +326,13 @@ class CacheBlk : public TaggedEntry
 
     /** Get the requestor id associated to this block. */
     uint32_t getSrcRequestorId() const { return _srcRequestorId; }
+
+    /**
+     * Shadow L1I: fill id of the request that filled this block, 0 if
+     * unknown. Measurement only.
+     */
+    void setShadowFillId(const uint64_t id) { _shadowFillId = id; }
+    uint64_t getShadowFillId() const { return _shadowFillId; }
 
     /** Get the number of references to this block since insertion. */
     unsigned getRefCount() const { return _refCount; }
@@ -536,6 +545,9 @@ class CacheBlk : public TaggedEntry
 
     /** holds the source requestor ID for this block. */
     int _srcRequestorId = 0;
+
+    /** Shadow L1I fill id of the request that filled this block */
+    uint64_t _shadowFillId = 0;
 
     /** Number of references to this block since it was brought in. */
     unsigned _refCount = 0;

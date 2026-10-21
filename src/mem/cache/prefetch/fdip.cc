@@ -4,6 +4,7 @@
 #include "base/trace.hh"
 #include "debug/FDIP.hh"
 #include "mem/cache/base.hh"
+#include "mem/cache/shadow_l1i.hh"
 #include "mem/packet.hh"
 #include "params/FDIPPrefetcher.hh"
 #include "sim/system.hh"
@@ -75,6 +76,9 @@ FDIPPrefetcher::enqueue(const RequestPtr &req)
                   PrefetchSourceType::FDIP, 0);
     // Keep the request instruction-side for lower levels
     dpp.pkt->req->setFlags(Request::INST_FETCH);
+    // Lets the shadow L1I attribute committed accesses to this prefetch
+    dpp.pkt->req->setShadowFillId(ShadowL1I::PrefetchFillBit |
+                                  ++shadowFillCount);
     addToQueue(pfq, dpp);
     fdipStats.queued++;
 

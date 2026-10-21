@@ -1649,6 +1649,13 @@ class Packet : public Printable
 
     bool coalescingMSHR{false};
 
+    /**
+     * Shadow L1I: on an L1I instruction fetch hit, the shadow fill id of the
+     * request that filled the line; on a merge into an in-flight MSHR, that
+     * of the request that allocated it. 0 otherwise. Measurement only.
+     */
+    uint64_t shadowFiller{0};
+
     int pfSource{PrefetchSourceType::PF_NONE};
 
     int pfDepth = 0;

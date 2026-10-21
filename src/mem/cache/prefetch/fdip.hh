@@ -57,6 +57,9 @@ class FDIPPrefetcher : public Queued
   private:
     BaseCache *parentCache = nullptr;
 
+    /** Prefetches given a shadow L1I fill id so far */
+    uint64_t shadowFillCount = 0;
+
     void wakeParentCache();
 
     struct FDIPStats : public statistics::Group

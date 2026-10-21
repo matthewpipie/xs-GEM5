@@ -616,7 +616,8 @@ class Request
           _xsMetadata(other._xsMetadata),
           _localAccessor(other._localAccessor),
           translateDelta(other.translateDelta),
-          accessDelta(other.accessDelta), depth(other.depth)
+          accessDelta(other.accessDelta), depth(other.depth),
+          _shadowFillId(other._shadowFillId)
     {
         atomicOpFunctor.reset(other.atomicOpFunctor ?
                                 other.atomicOpFunctor->clone() : nullptr);
@@ -799,6 +800,12 @@ class Request
      * (e.g. 0 = L1; 1 = L2).
      */
     mutable int depth = 0;
+
+    /**
+     * Shadow L1I: identifies the fetch line request (or FDIP prefetch) for
+     * attributing what filled an L1I line. 0 if none. Measurement only.
+     */
+    uint64_t _shadowFillId = 0;
 
     /**
      *  Accessor for size.
@@ -1152,6 +1159,10 @@ class Request
     void incAccessDepth() const { depth++; }
     int getAccessDepth() const { return depth; }
     void decAccessDepth() const { assert(depth > -1); if (depth > 0) depth--; }
+
+    /** Shadow L1I fill attribution id, 0 if none */
+    void setShadowFillId(uint64_t id) { _shadowFillId = id; }
+    uint64_t getShadowFillId() const { return _shadowFillId; }
 
 
     /**

@@ -32,6 +32,24 @@
  *   C = icache.demandMisses - A - B - U
  * and by construction shadowMisses == B + D.
  *
+ * Fill attribution. Every fetch line request and FDIP prefetch carries a fill
+ * id; the L1I stores the id of the request that filled each line, and returns
+ * it on a fetch hit, or the id of the request that started the fill on a
+ * merge into an in-flight MSHR. Whether a fetch was on the committed path is
+ * only known later, so the id is resolved when its fill retires and commit
+ * reaches it. A committed op that uses the line commits after the filling
+ * fetch is resolved, since that fetch is older. D and the merges in B are
+ * split by what brought the line in:
+ *   offPath     a fetch with no committed op using the line (C)
+ *   unusedLine  a fetch whose fill committed but whose line no op used (U)
+ *   fdip        an FDIP prefetch
+ *   onPath      an earlier committed access (the shadow evicted the line
+ *               sooner than the real L1I)
+ *   unknown     no fill id (expected 0)
+ * fillsUsed / fillsUsedLate count, once per filled line, the off-path,
+ * unused-line and FDIP fills that a committed access later hit, or merged
+ * into while in flight.
+ *
  * The shadow is indexed and tagged by the physical fetch address, like the
  * real (physically indexed) L1I, so both have the same set mapping.
  *
@@ -45,6 +63,8 @@
 
 #include <array>
 #include <deque>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "base/statistics.hh"
@@ -79,10 +99,31 @@ class ShadowL1I : public statistics::Group
         bool miss = false;
         /** That miss merged into an in-flight MSHR */
         bool mshrMerge = false;
+        /**
+         * Fill id of the request that brought the line in for this op: its
+         * own request on a primary miss, else the one the L1I reported
+         */
+        uint64_t filler = 0;
     };
 
     /** An op's bytes span at most two lines */
     using FetchLines = std::array<FetchLine, 2>;
+
+    /** One line of a fill retired from the fetch buffer */
+    struct RetiredLine
+    {
+        /** Fill id of the line's request, 0 if none */
+        uint64_t id = 0;
+        /** The real L1I demand-missed on the line */
+        bool miss = false;
+        /** That miss merged into an in-flight MSHR */
+        bool mshrMerge = false;
+        /** A built op had bytes in the line */
+        bool used = false;
+    };
+
+    /** Fill ids with this bit set are FDIP prefetches */
+    static constexpr uint64_t PrefetchFillBit = uint64_t(1) << 63;
 
     ShadowL1I(statistics::Group *parent, unsigned num_threads,
               unsigned num_sets, unsigned assoc, unsigned blk_size);
@@ -104,26 +145,43 @@ class ShadowL1I : public statistics::Group
                     unsigned num_insts);
 
     /**
-     * A fill retired with a real L1I demand miss on a line that no op used.
-     * It counts as an unused-line miss once an op of the fill commits; if
-     * none does, the miss stays off-path.
+     * A fill with at least one missed line will supply no more ops. Its
+     * lines that filled the L1I are recorded for attribution. Once an op of
+     * the fill commits, the fill is on the committed path and a missed line
+     * no op used counts as an unused-line miss; if none commits, the fill
+     * stays off-path.
      *
      * @param first_seq sequence number of the first op built from the fill
      * @param last_seq  sequence number of the last op built from the fill
      */
-    void unusedLineMiss(ThreadID tid, InstSeqNum first_seq,
-                        InstSeqNum last_seq, bool mshr_merge);
+    void retireFill(ThreadID tid, InstSeqNum first_seq, InstSeqNum last_seq,
+                    const std::array<RetiredLine, 2> &lines);
 
   private:
     /** Index of the primary / MSHR-merge split of the miss vectors */
     enum MissKind { Primary, MshrMerge, NumMissKinds };
 
-    /** A retired fill's unused-line miss, waiting for the fill to commit */
-    struct PendingUnusedMiss
+    /** What brought a line into the L1I; the first three are fills */
+    enum Source { OffPath, UnusedLine, Fdip, OnPath, Unknown, NumSources };
+    static constexpr unsigned NumFillSources = OnPath;
+
+    /** A retired fill, waiting for commit to reach it */
+    struct PendingFill
     {
         InstSeqNum firstSeq;
         InstSeqNum lastSeq;
-        bool mshrMerge;
+        std::array<RetiredLine, 2> lines;
+    };
+
+    /** A line a retired fill brought into the L1I */
+    struct LineRecord
+    {
+        /** A built op had bytes in the line */
+        bool used = false;
+        /** An op of the fill committed */
+        bool committedFill = false;
+        /** The op carrying the line's miss committed */
+        bool committedUse = false;
     };
 
     /** Block-align an address to the shadow's line size. */
@@ -141,8 +199,17 @@ class ShadowL1I : public statistics::Group
     /** Classify one committed line access. */
     void accessLine(ThreadID tid, const FetchLine &line);
 
-    /** Count pending unused-line misses whose fill committed op @p seq. */
-    void creditUnusedLineMisses(ThreadID tid, InstSeqNum seq);
+    /** Resolve pending fills that committed op @p seq is in or past. */
+    void resolveFills(ThreadID tid, InstSeqNum seq);
+
+    /** A fill had a committed op. */
+    void commitFill(const PendingFill &fill);
+
+    /** What brought in the line filled by request @p id. */
+    Source source(uint64_t id) const;
+
+    /** A committed access used a line that request @p id filled. */
+    void noteUse(ThreadID tid, uint64_t id, bool late);
 
     static MissKind
     missKind(bool mshr_merge)
@@ -171,8 +238,17 @@ class ShadowL1I : public statistics::Group
     /** Per-thread sequence number of the last committed op, 0 if none */
     std::vector<InstSeqNum> lastCommitSeq;
 
-    /** Per-thread unused-line misses of retired fills, oldest first */
-    std::vector<std::deque<PendingUnusedMiss>> pendingUnused;
+    /** Per-thread retired fills not yet resolved, oldest first */
+    std::vector<std::deque<PendingFill>> pendingFills;
+
+    /** Lines filled by retired fills, by fill id */
+    std::unordered_map<uint64_t, LineRecord> lineRecords;
+
+    /** Fills already counted in fillsUsed / fillsUsedLate */
+    std::unordered_set<uint64_t> usedFills;
+
+    /** Per-thread fill id last passed to noteUse, to skip repeats */
+    std::vector<uint64_t> lastNoted;
 
     /** Committed instructions observed (MPKI denominator). */
     statistics::Scalar shadowInsts;
@@ -197,6 +273,14 @@ class ShadowL1I : public statistics::Group
     statistics::Scalar onPathPrefetchHits;
     /** U: real miss on a line no op used, in a committed fill */
     statistics::Vector unusedLineMisses;
+    /** D by what brought the line in */
+    statistics::Vector prefetchHitFillers;
+    /** Merges in B by what started the fill */
+    statistics::Vector inherentMergeFillers;
+    /** Fills whose first committed use was a hit */
+    statistics::Vector fillsUsed;
+    /** Fills whose first committed use merged into the in-flight fill */
+    statistics::Vector fillsUsedLate;
 };
 
 } // namespace gem5

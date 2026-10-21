@@ -571,6 +571,9 @@ Fetch::handleMultiCacheLineFetch(Addr vaddr, ThreadID tid, Addr pc)
     first_mem_req->taskId(cpu->taskId());
     first_mem_req->setMisalignedFetch();
     first_mem_req->setReqNum(1);
+    if (cpu->isShadowL1IEnabled()) {
+        first_mem_req->setShadowFillId(++shadowFillCount);
+    }
 
     threads[tid].cacheReq.addRequest(first_mem_req); // packet will be created later
 
@@ -598,6 +601,9 @@ Fetch::handleMultiCacheLineFetch(Addr vaddr, ThreadID tid, Addr pc)
     second_mem_req->taskId(cpu->taskId());
     second_mem_req->setMisalignedFetch();
     second_mem_req->setReqNum(2);
+    if (cpu->isShadowL1IEnabled()) {
+        second_mem_req->setShadowFillId(++shadowFillCount);
+    }
 
     threads[tid].cacheReq.addRequest(second_mem_req);  // Add second request to cache request
 
@@ -1963,6 +1969,11 @@ Fetch::recordShadowFill(ThreadID tid, PacketPtr first_pkt,
         // the L1I is the first level, so any depth means an L1I demand miss
         line.miss = pkt->req->getAccessDepth() > 0;
         line.mshrMerge = pkt->missOnLatePf || pkt->coalescingMSHR;
+        line.id = pkt->req->getShadowFillId();
+        // A primary miss filled the line itself; otherwise the L1I says
+        // which request did (hit) or is doing (merge)
+        line.filler = line.miss && !line.mshrMerge ? line.id
+                                                   : pkt->shadowFiller;
     }
 }
 
@@ -1992,6 +2003,7 @@ Fetch::stampShadowFetchLines(ThreadID tid, const DynInstPtr &inst,
             }
             auto &own = inst->shadowFetchLines[n++];
             own.paddr = line.paddr;
+            own.filler = line.filler;
             line.used = true;
             if (line.miss && !line.stamped) {
                 own.miss = true;
@@ -2008,13 +2020,16 @@ Fetch::retireShadowFill(ThreadID tid)
 {
     auto &fill = shadowFill[tid];
     // Without ops the fill is on no path that can commit
-    if (fill.firstSeq != 0) {
-        for (const auto &line : fill.lines) {
-            if (line.vaddr != MaxAddr && line.miss && !line.used) {
-                cpu->getShadowL1I()->unusedLineMiss(
-                    tid, fill.firstSeq, fill.lastSeq, line.mshrMerge);
-            }
+    if (fill.firstSeq != 0 &&
+        std::any_of(fill.lines.begin(), fill.lines.end(),
+                    [](const auto &line) { return line.miss; })) {
+        std::array<ShadowL1I::RetiredLine, 2> lines;
+        for (int i = 0; i < 2; i++) {
+            const auto &line = fill.lines[i];
+            lines[i] = {line.id, line.miss, line.mshrMerge, line.used};
         }
+        cpu->getShadowL1I()->retireFill(tid, fill.firstSeq, fill.lastSeq,
+                                        lines);
     }
     fill = ShadowFill();
 }
