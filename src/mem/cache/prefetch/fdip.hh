@@ -13,6 +13,8 @@
 #ifndef __MEM_CACHE_PREFETCH_FDIP_HH__
 #define __MEM_CACHE_PREFETCH_FDIP_HH__
 
+#include <functional>
+
 #include "base/statistics.hh"
 #include "base/types.hh"
 #include "mem/cache/prefetch/queued.hh"
@@ -41,6 +43,16 @@ class FDIPPrefetcher : public Queued
                            std::vector<AddrPriority> &addresses) override {}
     void notify(const PacketPtr &pkt, const PrefetchInfo &pfi) override {}
 
+    /** Reports the shadow L1I fill id of each fill of an FDIP prefetch */
+    void notifyFill(const PacketPtr &pkt) override;
+
+    /** Called with the shadow L1I fill id of every FDIP prefetch fill */
+    void
+    setShadowFillCallback(std::function<void(uint64_t)> callback)
+    {
+        shadowFillCallback = std::move(callback);
+    }
+
     /**
      * Queue a prefetch for the cache line of a translated fetch request.
      * @param req translated request carrying paddr, vaddr, pc and context
@@ -57,8 +69,7 @@ class FDIPPrefetcher : public Queued
   private:
     BaseCache *parentCache = nullptr;
 
-    /** Prefetches given a shadow L1I fill id so far */
-    uint64_t shadowFillCount = 0;
+    std::function<void(uint64_t)> shadowFillCallback;
 
     void wakeParentCache();
 

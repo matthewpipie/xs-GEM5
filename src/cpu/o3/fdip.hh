@@ -66,8 +66,10 @@ class FDIPGenerator
     class Translation : public BaseMMU::Translation
     {
       public:
-        Translation(FDIPGenerator *_gen, ThreadID _tid, uint64_t _squash_gen)
-            : gen(_gen), tid(_tid), squashGen(_squash_gen)
+        Translation(FDIPGenerator *_gen, ThreadID _tid, uint64_t _squash_gen,
+                    uint64_t _target_uid)
+            : gen(_gen), tid(_tid), squashGen(_squash_gen),
+              targetUid(_target_uid)
         {}
 
         void markDelayed() override {}
@@ -79,6 +81,8 @@ class FDIPGenerator
         FDIPGenerator *gen;
         ThreadID tid;
         uint64_t squashGen;
+        /** FetchTarget::uid of the target the line belongs to */
+        uint64_t targetUid;
     };
 
     struct ThreadState
@@ -105,10 +109,12 @@ class FDIPGenerator
 
     bool isFiltered(ThreadID tid, Addr line);
 
-    void startTranslation(ThreadID tid, Addr line, Addr pc);
+    void startTranslation(ThreadID tid, Addr line, Addr pc,
+                          uint64_t target_uid);
 
     void finishTranslation(const Fault &fault, const RequestPtr &req,
-                           ThreadID tid, uint64_t squash_gen);
+                           ThreadID tid, uint64_t squash_gen,
+                           uint64_t target_uid);
 
     Addr lineAlign(Addr addr) const { return addr & ~Addr(blkSize - 1); }
 
@@ -130,6 +136,8 @@ class FDIPGenerator
     const unsigned filterSize;
 
     unsigned inflightTranslations = 0;
+    /** Prefetches given a shadow L1I fill id so far */
+    uint64_t shadowFillCount = 0;
     ThreadID rrThread = 0;
     ThreadState threads[MaxThreads];
 

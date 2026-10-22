@@ -25,6 +25,9 @@ ShadowL1I::ShadowL1I(statistics::Group *parent, unsigned num_threads,
       lastCommitSeq(num_threads, 0),
       pendingFills(num_threads),
       lastNoted(num_threads, 0),
+      pfTargets(num_threads),
+      pfRetired(num_threads),
+      lastFetchedUid(num_threads, 0),
       ADD_STAT(shadowInsts, statistics::units::Count::get(),
                "Committed instructions observed by the shadow L1I"),
       ADD_STAT(shadowAccesses, statistics::units::Count::get(),
@@ -62,7 +65,22 @@ ShadowL1I::ShadowL1I(statistics::Group *parent, unsigned num_threads,
                "use was a hit"),
       ADD_STAT(fillsUsedLate, statistics::units::Count::get(),
                "Lines filled off the committed path whose first committed "
-               "use merged into the fill in flight")
+               "use merged into the fill in flight"),
+      ADD_STAT(fdipFillsTotal, statistics::units::Count::get(),
+               "FDIP prefetch fills of the L1I, any path"),
+      ADD_STAT(fdipFills, statistics::units::Count::get(),
+               "FDIP prefetch fills by the path of their FTQ target"),
+      ADD_STAT(fdipFillsUsed, statistics::units::Count::get(),
+               "fillsUsed::fdip by the path of the prefetch's FTQ target"),
+      ADD_STAT(fdipFillsUsedLate, statistics::units::Count::get(),
+               "fillsUsedLate::fdip by the path of the prefetch's FTQ "
+               "target"),
+      ADD_STAT(fdipHits, statistics::units::Count::get(),
+               "prefetchHitFillers::fdip by the path of the prefetch's FTQ "
+               "target"),
+      ADD_STAT(fdipMerges, statistics::units::Count::get(),
+               "inherentMergeFillers::fdip by the path of the prefetch's "
+               "FTQ target")
 {
     fatal_if(num_sets == 0 || assoc == 0 || !isPowerOf2(blk_size),
              "Shadow L1I needs sets > 0, assoc > 0 and a power-of-2 block "
@@ -94,24 +112,171 @@ ShadowL1I::ShadowL1I(statistics::Group *parent, unsigned num_threads,
             .subname(Fdip, "fdip")
             .flags(statistics::total);
     }
+    for (auto *vec : {&fdipFills, &fdipFillsUsed, &fdipFillsUsedLate,
+                      &fdipHits, &fdipMerges}) {
+        vec->init(NumPfPaths)
+            .subname(CorrectPath, "correctPath")
+            .subname(WrongPath, "wrongPath")
+            .flags(statistics::total);
+    }
 }
 
 void
-ShadowL1I::commitInst(ThreadID tid, InstSeqNum seq, const FetchLines &lines,
-                      unsigned num_insts)
+ShadowL1I::commitInst(ThreadID tid, InstSeqNum seq, uint64_t target_uid,
+                      const FetchLines &lines, unsigned num_insts)
 {
     shadowInsts += num_insts;
     resolveFills(tid, seq);
 
     if (lines[0].paddr == MaxAddr) {
         shadowNoPAddr++;
-        return;
-    }
-    for (const auto &line : lines) {
-        if (line.paddr != MaxAddr) {
-            accessLine(tid, line);
+    } else {
+        markCorrectPath(tid, target_uid, lines);
+        for (const auto &line : lines) {
+            if (line.paddr != MaxAddr) {
+                accessLine(tid, line);
+            }
         }
     }
+
+    // Targets whose last op is this one or older have no op left to commit
+    auto &retired = pfRetired[tid];
+    while (!retired.empty() && retired.front().first <= seq) {
+        auto it = pfTargets[tid].find(retired.front().second);
+        if (it != pfTargets[tid].end()) {
+            resolveTarget(tid, it, WrongPath);
+        }
+        retired.pop_front();
+    }
+}
+
+void
+ShadowL1I::prefetchQueued(ThreadID tid, uint64_t id, uint64_t target_uid,
+                          Addr line_addr)
+{
+    auto &rec = prefetches[id];
+    rec.targetUid = target_uid;
+    rec.lineAddr = line_addr;
+    // Once fetch has reached the target, its ops may already have
+    // committed, so the path of a prefetch queued that late stays
+    // unresolved
+    if (target_uid != 0 && target_uid > lastFetchedUid[tid]) {
+        pfTargets[tid][target_uid].prefetches.push_back(id);
+    }
+}
+
+void
+ShadowL1I::prefetchFilled(uint64_t id)
+{
+    auto it = prefetches.find(id);
+    if (it != prefetches.end()) {
+        if (it->second.filled) {
+            return;
+        }
+        it->second.filled = true;
+        if (it->second.path != Unresolved) {
+            fdipFills[it->second.path]++;
+        }
+    }
+    fdipFillsTotal++;
+}
+
+void
+ShadowL1I::targetFetched(ThreadID tid, uint64_t target_uid)
+{
+    lastFetchedUid[tid] = std::max(lastFetchedUid[tid], target_uid);
+    // Fetch takes targets in uid order, so an older target fetch never
+    // started was squashed
+    auto &targets = pfTargets[tid];
+    for (auto it = targets.begin();
+         it != targets.end() && it->first < target_uid;) {
+        auto next = std::next(it);
+        if (!it->second.fetched) {
+            resolveTarget(tid, it, WrongPath);
+        }
+        it = next;
+    }
+    auto it = targets.find(target_uid);
+    if (it != targets.end()) {
+        it->second.fetched = true;
+    }
+}
+
+void
+ShadowL1I::targetRetired(ThreadID tid, uint64_t target_uid,
+                         InstSeqNum first_seq, InstSeqNum last_seq)
+{
+    auto it = pfTargets[tid].find(target_uid);
+    if (it == pfTargets[tid].end()) {
+        return;
+    }
+    // No ops, or all of them already committed or squashed
+    if (first_seq == 0 || lastCommitSeq[tid] >= last_seq) {
+        resolveTarget(tid, it, WrongPath);
+    } else {
+        pfRetired[tid].emplace_back(last_seq, target_uid);
+    }
+}
+
+void
+ShadowL1I::markCorrectPath(ThreadID tid, uint64_t target_uid,
+                           const FetchLines &lines)
+{
+    auto &targets = pfTargets[tid];
+    auto it = targets.find(target_uid);
+    if (target_uid == 0 || it == targets.end()) {
+        return;
+    }
+    auto &ids = it->second.prefetches;
+    for (const auto &line : lines) {
+        if (line.paddr == MaxAddr) {
+            continue;
+        }
+        const Addr blk_addr = blockAddr(line.paddr);
+        for (auto i = ids.begin(); i != ids.end();) {
+            auto &rec = prefetches[*i];
+            if (rec.lineAddr == blk_addr) {
+                resolvePrefetch(rec, CorrectPath);
+                i = ids.erase(i);
+            } else {
+                ++i;
+            }
+        }
+    }
+    if (ids.empty()) {
+        targets.erase(it);
+    }
+}
+
+void
+ShadowL1I::resolveTarget(ThreadID tid,
+                         std::map<uint64_t, PfTarget>::iterator it,
+                         PfPath path)
+{
+    for (uint64_t id : it->second.prefetches) {
+        resolvePrefetch(prefetches[id], path);
+    }
+    pfTargets[tid].erase(it);
+}
+
+void
+ShadowL1I::resolvePrefetch(PrefetchRecord &rec, PfPath path)
+{
+    if (rec.path != Unresolved) {
+        return;
+    }
+    rec.path = path;
+    if (rec.filled) {
+        fdipFills[path]++;
+    }
+    if (rec.use == UsedTimely) {
+        fdipFillsUsed[path]++;
+    } else if (rec.use == UsedLate) {
+        fdipFillsUsedLate[path]++;
+    }
+    fdipHits[path] += rec.pendingHits;
+    fdipMerges[path] += rec.pendingMerges;
+    rec.pendingHits = rec.pendingMerges = 0;
 }
 
 void
@@ -197,6 +362,14 @@ ShadowL1I::noteUse(ThreadID tid, uint64_t id, bool late)
     const Source src = source(id);
     if (src < NumFillSources && usedFills.insert(id).second) {
         (late ? fillsUsedLate : fillsUsed)[src]++;
+        auto it = src == Fdip ? prefetches.find(id) : prefetches.end();
+        if (it != prefetches.end()) {
+            auto &rec = it->second;
+            rec.use = late ? UsedLate : UsedTimely;
+            if (rec.path != Unresolved) {
+                (late ? fdipFillsUsedLate : fdipFillsUsed)[rec.path]++;
+            }
+        }
     }
 }
 
@@ -213,7 +386,17 @@ ShadowL1I::accessLine(ThreadID tid, const FetchLine &line)
         shadow_hit = probe(blk_addr);
         if (!shadow_hit && !line.miss) {
             onPathPrefetchHits++;
-            prefetchHitFillers[source(line.filler)]++;
+            const Source src = source(line.filler);
+            prefetchHitFillers[src]++;
+            auto it = src == Fdip ? prefetches.find(line.filler)
+                                  : prefetches.end();
+            if (it != prefetches.end()) {
+                if (it->second.path != Unresolved) {
+                    fdipHits[it->second.path]++;
+                } else {
+                    it->second.pendingHits++;
+                }
+            }
         }
     }
 
@@ -222,7 +405,17 @@ ShadowL1I::accessLine(ThreadID tid, const FetchLine &line)
             shadow_hit ? onPathPollutionMisses : onPathInherentMisses;
         bucket[missKind(line.mshrMerge)]++;
         if (line.mshrMerge && !shadow_hit) {
-            inherentMergeFillers[source(line.filler)]++;
+            const Source src = source(line.filler);
+            inherentMergeFillers[src]++;
+            auto it = src == Fdip ? prefetches.find(line.filler)
+                                  : prefetches.end();
+            if (it != prefetches.end()) {
+                if (it->second.path != Unresolved) {
+                    fdipMerges[it->second.path]++;
+                } else {
+                    it->second.pendingMerges++;
+                }
+            }
         }
         if (!line.mshrMerge) {
             // This op's own request filled the line

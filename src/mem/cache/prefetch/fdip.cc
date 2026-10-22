@@ -77,8 +77,7 @@ FDIPPrefetcher::enqueue(const RequestPtr &req)
     // Keep the request instruction-side for lower levels
     dpp.pkt->req->setFlags(Request::INST_FETCH);
     // Lets the shadow L1I attribute committed accesses to this prefetch
-    dpp.pkt->req->setShadowFillId(ShadowL1I::PrefetchFillBit |
-                                  ++shadowFillCount);
+    dpp.pkt->req->setShadowFillId(req->getShadowFillId());
     addToQueue(pfq, dpp);
     fdipStats.queued++;
 
@@ -88,6 +87,15 @@ FDIPPrefetcher::enqueue(const RequestPtr &req)
 
     wakeParentCache();
     return true;
+}
+
+void
+FDIPPrefetcher::notifyFill(const PacketPtr &pkt)
+{
+    const uint64_t id = pkt->req->getShadowFillId();
+    if (shadowFillCallback && (id & ShadowL1I::PrefetchFillBit)) {
+        shadowFillCallback(id);
+    }
 }
 
 void

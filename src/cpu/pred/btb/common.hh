@@ -337,6 +337,9 @@ struct PathHistoryUpdate
 struct FetchTarget
 {
     ThreadID tid;
+    // Unique per target instance, set when it enters the FTQ (FTQ ids are
+    // reused after a squash). Used by the shadow L1I.
+    uint64_t uid = 0;
     uint8_t asidHash;
     Addr startPC;       // start pc of the stream
     bool predTaken;     // whether the FetchTarget has taken branch

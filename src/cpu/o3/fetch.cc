@@ -549,6 +549,11 @@ Fetch::handleMultiCacheLineFetch(Addr vaddr, ThreadID tid, Addr pc)
     // The previous fill supplies no more ops
     if (cpu->isShadowL1IEnabled()) {
         retireShadowFill(tid);
+        if (dbpbtb->ftqHasFetching(tid)) {
+            const uint64_t uid = dbpbtb->ftqFetchingTarget(tid).uid;
+            shadowFill[tid].targetUid = uid;
+            cpu->getShadowL1I()->targetFetched(tid, uid);
+        }
     }
 
     // Reset cache request state for this thread
@@ -1959,7 +1964,9 @@ Fetch::recordShadowFill(ThreadID tid, PacketPtr first_pkt,
 {
     const Addr blk_mask = ~Addr(cacheBlkSize - 1);
     auto &fill = shadowFill[tid];
+    const uint64_t target_uid = fill.targetUid;
     fill = ShadowFill();
+    fill.targetUid = target_uid;
     for (int i = 0; i < 2; i++) {
         const PacketPtr pkt = i == 0 ? first_pkt : second_pkt;
         auto &line = fill.lines[i];
@@ -1987,6 +1994,7 @@ Fetch::stampShadowFetchLines(ThreadID tid, const DynInstPtr &inst,
         fill.firstSeq = inst->seqNum;
     }
     fill.lastSeq = inst->seqNum;
+    inst->shadowTargetUid = fill.targetUid;
 
     // An op can straddle into the next line. A wrong-path PC can sit in the
     // last line of the address space, where the op's end wraps around to 0.
@@ -2030,6 +2038,10 @@ Fetch::retireShadowFill(ThreadID tid)
         }
         cpu->getShadowL1I()->retireFill(tid, fill.firstSeq, fill.lastSeq,
                                         lines);
+    }
+    if (fill.targetUid != 0) {
+        cpu->getShadowL1I()->targetRetired(tid, fill.targetUid,
+                                           fill.firstSeq, fill.lastSeq);
     }
     fill = ShadowFill();
 }

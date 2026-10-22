@@ -9,6 +9,7 @@
 #include "cpu/pred/btb/decoupled_bpred.hh"
 #include "debug/FDIP.hh"
 #include "mem/cache/prefetch/fdip.hh"
+#include "mem/cache/shadow_l1i.hh"
 #include "params/BaseO3CPU.hh"
 #include "sim/drain.hh"
 
@@ -36,6 +37,12 @@ FDIPGenerator::FDIPGenerator(
     fatal_if(distance == 0 || issueWidth == 0 || maxInflight == 0,
              "fdipDistance, fdipIssueWidth and fdipMaxInflight must be > 0");
     stats.distanceAtIssue.init(1, distance, 1);
+    // The shadow L1I counts every FDIP fill, by the fill id set below
+    prefetcher->setShadowFillCallback([this](uint64_t id) {
+        if (auto *shadow = cpu->getShadowL1I()) {
+            shadow->prefetchFilled(id);
+        }
+    });
 }
 
 void
@@ -111,7 +118,7 @@ FDIPGenerator::generateOne(ThreadID tid)
         bool started = false;
         if (!isFiltered(tid, line)) {
             stats.distanceAtIssue.sample(bpu->ftqPrefetchDistance(tid));
-            startTranslation(tid, line, target.startPC);
+            startTranslation(tid, line, target.startPC, target.uid);
             started = true;
         }
 
@@ -156,7 +163,8 @@ FDIPGenerator::isFiltered(ThreadID tid, Addr line)
 }
 
 void
-FDIPGenerator::startTranslation(ThreadID tid, Addr line, Addr pc)
+FDIPGenerator::startTranslation(ThreadID tid, Addr line, Addr pc,
+                                uint64_t target_uid)
 {
     RequestPtr req = std::make_shared<Request>(
         line, blkSize, Request::INST_FETCH | Request::PREFETCH,
@@ -169,7 +177,8 @@ FDIPGenerator::startTranslation(ThreadID tid, Addr line, Addr pc)
     stats.translationsStarted++;
     // Count before translating, the translation may finish synchronously
     ++inflightTranslations;
-    auto *trans = new Translation(this, tid, threads[tid].squashGen);
+    auto *trans = new Translation(this, tid, threads[tid].squashGen,
+                                  target_uid);
     cpu->mmu->translateTiming(req, cpu->thread[tid]->getTC(), trans,
                               BaseMMU::Execute);
 }
@@ -180,13 +189,14 @@ FDIPGenerator::Translation::finish(const Fault &fault, const RequestPtr &req,
                                    BaseMMU::Mode mode)
 {
     assert(mode == BaseMMU::Execute);
-    gen->finishTranslation(fault, req, tid, squashGen);
+    gen->finishTranslation(fault, req, tid, squashGen, targetUid);
     delete this;
 }
 
 void
 FDIPGenerator::finishTranslation(const Fault &fault, const RequestPtr &req,
-                                 ThreadID tid, uint64_t squash_gen)
+                                 ThreadID tid, uint64_t squash_gen,
+                                 uint64_t target_uid)
 {
     assert(inflightTranslations > 0);
     --inflightTranslations;
@@ -204,8 +214,16 @@ FDIPGenerator::finishTranslation(const Fault &fault, const RequestPtr &req,
         return;
     }
 
+    auto *shadow = cpu->getShadowL1I();
+    if (shadow) {
+        req->setShadowFillId(ShadowL1I::PrefetchFillBit | ++shadowFillCount);
+    }
     if (prefetcher->enqueue(req)) {
         stats.sentToPrefetcher++;
+        if (shadow) {
+            shadow->prefetchQueued(tid, req->getShadowFillId(), target_uid,
+                                   lineAlign(req->getPaddr()));
+        }
     } else {
         stats.rejectedByPrefetcher++;
     }

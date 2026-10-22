@@ -1383,7 +1383,8 @@ CPU::shadowCommitInst(const DynInstPtr &inst)
         num_insts = inst->staticInst->isFusion() ? 2 : 1;
     }
     shadowL1I->commitInst(inst->threadNumber, inst->seqNum,
-                          inst->shadowFetchLines, num_insts);
+                          inst->shadowTargetUid, inst->shadowFetchLines,
+                          num_insts);
 }
 
 void

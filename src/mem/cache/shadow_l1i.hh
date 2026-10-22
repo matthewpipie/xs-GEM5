@@ -50,6 +50,19 @@
  * unused-line and FDIP fills that a committed access later hit, or merged
  * into while in flight.
  *
+ * FDIP prefetch path. A prefetch is for one line of one FTQ target (by
+ * FetchTarget::uid). It is on the correct path if an op of that target
+ * commits with bytes in that line, and on the wrong path if fetch skips the
+ * target (it was squashed before being fetched) or commit passes the
+ * target's last op without such an op. A prefetch queued after fetch had
+ * reached its target, or whose target is still pending at the end of the
+ * window, stays unresolved. fdipFills / fdipFillsUsed / fdipFillsUsedLate /
+ * fdipHits / fdipMerges split FDIP fills, their committed use, and the fdip
+ * parts of prefetchHitFillers and inherentMergeFillers by path; the
+ * unresolved rest is the difference to fdipFillsTotal, fillsUsed::fdip,
+ * fillsUsedLate::fdip, prefetchHitFillers::fdip and
+ * inherentMergeFillers::fdip.
+ *
  * The shadow is indexed and tagged by the physical fetch address, like the
  * real (physically indexed) L1I, so both have the same set mapping.
  *
@@ -63,6 +76,7 @@
 
 #include <array>
 #include <deque>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -137,12 +151,14 @@ class ShadowL1I : public statistics::Group
      *
      * @param tid       committing thread
      * @param seq       sequence number of the op
+     * @param target_uid FetchTarget::uid of the target the op was fetched
+     *                  for, 0 if unknown
      * @param lines     the op's fetch lines and real L1I outcomes
      * @param num_insts committed instructions this op adds to the MPKI
      *                  denominator (same rule as committedInsts)
      */
-    void commitInst(ThreadID tid, InstSeqNum seq, const FetchLines &lines,
-                    unsigned num_insts);
+    void commitInst(ThreadID tid, InstSeqNum seq, uint64_t target_uid,
+                    const FetchLines &lines, unsigned num_insts);
 
     /**
      * A fill with at least one missed line will supply no more ops. Its
@@ -156,6 +172,23 @@ class ShadowL1I : public statistics::Group
      */
     void retireFill(ThreadID tid, InstSeqNum first_seq, InstSeqNum last_seq,
                     const std::array<RetiredLine, 2> &lines);
+
+    /** FDIP queued prefetch @p id for line @p line_addr of a target. */
+    void prefetchQueued(ThreadID tid, uint64_t id, uint64_t target_uid,
+                        Addr line_addr);
+
+    /** FDIP prefetch @p id filled an L1I line. */
+    void prefetchFilled(uint64_t id);
+
+    /** Fetch started fetching target @p target_uid. */
+    void targetFetched(ThreadID tid, uint64_t target_uid);
+
+    /**
+     * The fill of target @p target_uid retired; its ops are in
+     * [first_seq, last_seq], or first_seq is 0 if there are none.
+     */
+    void targetRetired(ThreadID tid, uint64_t target_uid,
+                       InstSeqNum first_seq, InstSeqNum last_seq);
 
   private:
     /** Index of the primary / MSHR-merge split of the miss vectors */
@@ -171,6 +204,33 @@ class ShadowL1I : public statistics::Group
         InstSeqNum firstSeq;
         InstSeqNum lastSeq;
         std::array<RetiredLine, 2> lines;
+    };
+
+    /** Path of an FDIP prefetch, by the fate of its target */
+    enum PfPath : uint8_t
+    {
+        CorrectPath, WrongPath, NumPfPaths, Unresolved = NumPfPaths
+    };
+    enum PfUse : uint8_t { NotUsed, UsedTimely, UsedLate };
+
+    /** An FDIP prefetch queued by fetch */
+    struct PrefetchRecord
+    {
+        uint64_t targetUid = 0;
+        Addr lineAddr = 0;
+        PfPath path = Unresolved;
+        PfUse use = NotUsed;
+        bool filled = false;
+        /** fdipHits / fdipMerges events waiting for the path */
+        uint32_t pendingHits = 0;
+        uint32_t pendingMerges = 0;
+    };
+
+    /** A target with unresolved prefetches */
+    struct PfTarget
+    {
+        std::vector<uint64_t> prefetches;
+        bool fetched = false;
     };
 
     /** A line a retired fill brought into the L1I */
@@ -211,6 +271,18 @@ class ShadowL1I : public statistics::Group
     /** A committed access used a line that request @p id filled. */
     void noteUse(ThreadID tid, uint64_t id, bool late);
 
+    /** Decide the path of FDIP prefetch @p rec and count what waited. */
+    void resolvePrefetch(PrefetchRecord &rec, PfPath path);
+
+    /** Resolve the unresolved prefetches of a target, then forget it. */
+    void resolveTarget(ThreadID tid,
+                       std::map<uint64_t, PfTarget>::iterator it,
+                       PfPath path);
+
+    /** Prefetches of an op's target for the op's lines are correct-path. */
+    void markCorrectPath(ThreadID tid, uint64_t target_uid,
+                         const FetchLines &lines);
+
     static MissKind
     missKind(bool mshr_merge)
     {
@@ -250,6 +322,19 @@ class ShadowL1I : public statistics::Group
     /** Per-thread fill id last passed to noteUse, to skip repeats */
     std::vector<uint64_t> lastNoted;
 
+    /** FDIP prefetches queued, by fill id */
+    std::unordered_map<uint64_t, PrefetchRecord> prefetches;
+
+    /** Per-thread targets with unresolved prefetches, by uid */
+    std::vector<std::map<uint64_t, PfTarget>> pfTargets;
+
+    /** Per-thread retired fetched targets with unresolved prefetches,
+     *  as (last op seq, uid), oldest first */
+    std::vector<std::deque<std::pair<InstSeqNum, uint64_t>>> pfRetired;
+
+    /** Per-thread uid of the target fetch most recently started */
+    std::vector<uint64_t> lastFetchedUid;
+
     /** Committed instructions observed (MPKI denominator). */
     statistics::Scalar shadowInsts;
     /** Distinct committed fetch-block accesses probed against the shadow. */
@@ -281,6 +366,18 @@ class ShadowL1I : public statistics::Group
     statistics::Vector fillsUsed;
     /** Fills whose first committed use merged into the in-flight fill */
     statistics::Vector fillsUsedLate;
+    /** FDIP prefetch fills, any path */
+    statistics::Scalar fdipFillsTotal;
+    /** FDIP prefetch fills by path */
+    statistics::Vector fdipFills;
+    /** fillsUsed::fdip by path */
+    statistics::Vector fdipFillsUsed;
+    /** fillsUsedLate::fdip by path */
+    statistics::Vector fdipFillsUsedLate;
+    /** prefetchHitFillers::fdip by path */
+    statistics::Vector fdipHits;
+    /** inherentMergeFillers::fdip by path */
+    statistics::Vector fdipMerges;
 };
 
 } // namespace gem5

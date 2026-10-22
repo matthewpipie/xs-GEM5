@@ -563,6 +563,8 @@ class Fetch
         /** Sequence numbers of the first and last op built, 0 if none */
         InstSeqNum firstSeq = 0;
         InstSeqNum lastSeq = 0;
+        /** FetchTarget::uid of the target being fetched, 0 if none */
+        uint64_t targetUid = 0;
     };
     ShadowFill shadowFill[MaxThreads];
 

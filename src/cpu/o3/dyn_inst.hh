@@ -433,6 +433,9 @@ class DynInst : public ExecContext, public RefCounted
      */
     ShadowL1I::FetchLines shadowFetchLines;
 
+    /** Shadow L1I: FetchTarget::uid of the target fetched, 0 if unknown */
+    uint64_t shadowTargetUid = 0;
+
     /** ftqId is used for squashing and committing */
     /** The fetch stream queue ID of the instruction. */
     unsigned ftqId;

@@ -35,6 +35,9 @@ class FetchTargetQueue
     } queue[MaxThreads];
 
     uint32_t roundRobinPtr = 0;
+
+    /** Last FetchTarget::uid handed out */
+    uint64_t lastTargetUid = 0;
 public:
     FetchTargetQueue(uint32_t numThreads_, const uint32_t ftqSize_)
         : numThreads(numThreads_)

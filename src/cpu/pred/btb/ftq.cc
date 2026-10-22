@@ -30,6 +30,7 @@ FetchTargetQueue::insert(FetchTarget& target)
 {
     ThreadID tid = target.tid;
     assert(queue[tid].cap.size() < ftqSize[tid]);
+    target.uid = ++lastTargetUid;
     queue[tid].cap.push_back(target);
 }
 
