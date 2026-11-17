@@ -435,6 +435,20 @@ struct FetchTarget
         return startPC;
     }
 
+    /**
+     * End of the bytes fetch reads for this target, capped at max_bytes
+     * from startPC. predEndPC is the fall-through end even when a taken
+     * branch is predicted, so it overstates a taken target. Fetch hands
+     * the decoder 4 bytes at the PC of every op, so the last op (the
+     * taken branch, or an op starting before predEndPC) needs up to
+     * 4 bytes.
+     */
+    Addr fetchBytesEnd(unsigned max_bytes) const {
+        const Addr last_op = predTaken ? predBranchInfo.pc : predEndPC - 2;
+        const Addr end = std::max<Addr>(last_op, startPC) + 4;
+        return std::min<Addr>(end, startPC + max_bytes);
+    }
+
     DirectionHistoryUpdate getGHistUpdateDuringSquash(
         Addr squash_pc, bool is_cond, bool actually_taken) const
     {

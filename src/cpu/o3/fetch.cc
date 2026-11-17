@@ -238,6 +238,12 @@ Fetch::FetchStatGroup::FetchStatGroup(CPU *cpu, Fetch *fetch)
              "Number of stall cycles due to full MSHR"),
     ADD_STAT(cacheLines, statistics::units::Count::get(),
              "Number of cache lines fetched"),
+    ADD_STAT(singleLineFetches, statistics::units::Count::get(),
+             "Number of fetches that requested only the first line of the "
+             "window, as the fetch target ends in it"),
+    ADD_STAT(windowRefetches, statistics::units::Count::get(),
+             "Number of one-line fetches refetched as the whole window "
+             "after decode ran past the fetched bytes"),
     ADD_STAT(icacheSquashes, statistics::units::Count::get(),
              "Number of outstanding Icache misses that were squashed"),
     ADD_STAT(tlbSquashes, statistics::units::Count::get(),
@@ -324,6 +330,10 @@ Fetch::FetchStatGroup::FetchStatGroup(CPU *cpu, Fetch *fetch)
             .prereq(blockedCycles);
         cacheLines
             .prereq(cacheLines);
+        singleLineFetches
+            .prereq(singleLineFetches);
+        windowRefetches
+            .prereq(windowRefetches);
         miscStallCycles
             .prereq(miscStallCycles);
         pendingDrainCycles
@@ -544,13 +554,31 @@ Fetch::handleMultiCacheLineFetch(Addr vaddr, ThreadID tid, Addr pc)
     // Transition to WaitingCache state when initiating cache access
     setThreadStatus(tid, WaitingCache);
 
+    Addr fetchPC = vaddr;
+    unsigned fetchSize = cacheBlkSize - fetchPC % cacheBlkSize;  // Size for first cache line
+
+    // Fetch the second line of the window only when the bytes of the
+    // fetch target reach into it, or when decode already ran past a
+    // one-line fetch of this target
+    Addr bytes_end = vaddr + fetchBufferSize;
+    if (!threads[tid].fullWindow && dbpbtb->ftqHasFetching(tid)) {
+        const auto &target = dbpbtb->ftqFetchingTarget(tid);
+        if (target.startPC == vaddr) {
+            bytes_end = target.fetchBytesEnd(fetchBufferSize);
+        }
+    }
+    threads[tid].fullWindow = false;
+    const bool two_lines = bytes_end > vaddr + fetchSize;
+    threads[tid].fetchEnd =
+        two_lines ? vaddr + fetchBufferSize : vaddr + fetchSize;
+    if (!two_lines) {
+        ++fetchStats.singleLineFetches;
+    }
+
     // Reset cache request state for this thread
     threads[tid].cacheReq.reset();
     threads[tid].cacheReq.baseAddr = vaddr;
-    threads[tid].cacheReq.totalSize = fetchBufferSize;
-
-    Addr fetchPC = vaddr;
-    unsigned fetchSize = cacheBlkSize - fetchPC % cacheBlkSize;  // Size for first cache line
+    threads[tid].cacheReq.totalSize = threads[tid].fetchEnd - vaddr;
 
     DPRINTF(Fetch, "[tid:%i] Creating first cache line request: addr=%#x, size=%d\n",
             tid, fetchPC, fetchSize);
@@ -573,6 +601,12 @@ Fetch::handleMultiCacheLineFetch(Addr vaddr, ThreadID tid, Addr pc)
     FetchTranslation *trans = new FetchTranslation(this);
     cpu->mmu->translateTiming(first_mem_req, cpu->thread[tid]->getTC(),
                               trans, BaseMMU::Execute);
+
+    if (!two_lines) {
+        DPRINTF(Fetch, "[tid:%i] Target bytes end at %#lx, in the first "
+                "line, not fetching the second line\n", tid, bytes_end);
+        return true;
+    }
 
     // Prepare second request (head of second cache line)
     fetchPC += fetchSize;  // Move to start of next cache line
@@ -680,11 +714,16 @@ Fetch::processMultiCacheLineCompletion(ThreadID tid, PacketPtr pkt)
         }
     }
 
-    assert(firstPkt && secondPkt);
+    // The second line is only fetched when the target's bytes reach it
+    assert(firstPkt);
+    assert(secondPkt || threads[tid].cacheReq.packets.size() == 1);
 
     // Copy merged data directly into fetchBuffer
     memcpy(threads[tid].data, firstPkt->getConstPtr<uint8_t>(), firstPkt->getSize());
-    memcpy(threads[tid].data + firstPkt->getSize(), secondPkt->getConstPtr<uint8_t>(), secondPkt->getSize());
+    if (secondPkt) {
+        memcpy(threads[tid].data + firstPkt->getSize(),
+               secondPkt->getConstPtr<uint8_t>(), secondPkt->getSize());
+    }
     threads[tid].valid = true;
 
     // Clean up the packets
@@ -1230,6 +1269,7 @@ Fetch::doSquash(PCStateBase &new_pc, const DynInstPtr squashInst, const InstSeqN
 
     // Force a new I-cache request for the next FTQ head after squash.
     threads[tid].valid = false;
+    threads[tid].fullWindow = false;
     ftqEntryFetchedInsts[tid] = 0;
 
     if (fdip) {
@@ -2025,6 +2065,21 @@ Fetch::checkMemoryNeeds(ThreadID tid, const PCStateBase &this_pc,
     // Check if fetch buffer is valid and contains this PC
     if (!threads[tid].valid) {
         DPRINTF(Fetch, "[tid:%i] Fetch buffer invalid, stalling on ICache\n", tid);
+        return StallReason::IcacheStall;
+    }
+
+    // Only the first line was fetched, but decode ran past the predicted
+    // end of the target (e.g. a BTB entry whose PC is inside an op):
+    // refetch the whole window
+    if (fetch_pc >= threads[tid].startPC &&
+        fetch_pc + 4 > threads[tid].fetchEnd &&
+        fetch_pc + 4 <= threads[tid].startPC + fetchBufferSize) {
+        DPRINTF(Fetch, "[tid:%i] PC %#x past the fetched bytes [%#x, %#x), "
+                "refetching the whole window\n",
+                tid, fetch_pc, threads[tid].startPC, threads[tid].fetchEnd);
+        ++fetchStats.windowRefetches;
+        threads[tid].valid = false;
+        threads[tid].fullWindow = true;
         return StallReason::IcacheStall;
     }
 
