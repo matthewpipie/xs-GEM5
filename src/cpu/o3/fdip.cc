@@ -84,10 +84,10 @@ FDIPGenerator::generateOne(ThreadID tid)
         const auto id = bpu->ftqPrefetchId(tid);
         const auto &target = bpu->ftqPrefetchTarget(tid);
 
+        // The lines demand fetch reads for the target: up to a predicted
+        // taken branch, not to the fall-through end (predEndPC)
+        const Addr end_addr = target.fetchBytesEnd(fetchBufferSize);
         // FTQ ids are reused after a squash, so also match the contents
-        const Addr end = std::min<Addr>(target.predEndPC,
-                                        target.startPC + fetchBufferSize);
-        const Addr end_addr = end > target.startPC ? end : target.startPC + 1;
         if (st.targetId != id || st.startPC != target.startPC ||
             st.endAddr != end_addr) {
             st.targetId = id;
@@ -133,7 +133,7 @@ FDIPGenerator::isFiltered(ThreadID tid, Addr line)
     if (bpu->ftqHasFetching(tid)) {
         const auto &fetching = bpu->ftqFetchingTarget(tid);
         if (line >= lineAlign(fetching.startPC) &&
-            line < fetching.startPC + fetchBufferSize) {
+            line < fetching.fetchBytesEnd(fetchBufferSize)) {
             stats.filteredDemand++;
             return true;
         }

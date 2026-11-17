@@ -892,8 +892,20 @@ class Fetch
         /** Size of the fetch buffer in bytes. Set by Fetch class during init. */
         unsigned size;
 
+        /** End of the bytes requested from the I-cache for this buffer:
+         *  the end of the first line when only that line was fetched,
+         *  else startPC + size. */
+        Addr fetchEnd;
+
+        /** Fetch the whole window, both lines, on the next request. Set
+         *  when decode ran past the bytes of a one-line fetch. */
+        bool fullWindow;
+
         /** Constructor initializes buffer with default size */
-        FetchBuffer() : data(nullptr), startPC(0), valid(false), size(0) {
+        FetchBuffer()
+            : data(nullptr), startPC(0), valid(false), size(0), fetchEnd(0),
+              fullWindow(false)
+        {
         }
 
         /** Destructor is not needed as Fetch class manages memory */
@@ -904,6 +916,8 @@ class Fetch
         void reset() {
             valid = false;
             startPC = 0;
+            fetchEnd = 0;
+            fullWindow = false;
             // No need to clear data as it will be overwritten
         }
 
@@ -1083,6 +1097,13 @@ class Fetch
         statistics::Scalar icacheWaitRetryStallCycles;
         /** Stat for total number of fetched cache lines. */
         statistics::Scalar cacheLines;
+        /** Fetch requests that fetched only the first line of the window,
+         *  as the target's bytes end in it. */
+        statistics::Scalar singleLineFetches;
+        /** One-line fetches refetched as the whole window because decode
+         *  ran past the fetched bytes (e.g. a BTB entry whose PC is not
+         *  on an op boundary). */
+        statistics::Scalar windowRefetches;
         /** Total number of outstanding icache accesses that were dropped
          * due to a squash.
          */
