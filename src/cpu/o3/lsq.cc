@@ -3062,6 +3062,12 @@ LSQ::pushRequest(const DynInstPtr& inst, bool isLoad, uint8_t *data,
     const bool htm_cmd = isLoad && (flags & Request::HTM_CMD);
     const bool tlbi_cmd = isLoad && (flags & Request::TLBI_CMD);
 
+    // Set the access size before translating. A translation that completes
+    // later (SingleDataRequest/SplitDataRequest::finish) sets physEffAddr
+    // but not effSize, and pipeLineNukeCheck uses both once the store's
+    // translation is complete.
+    inst->effSize = size;
+
     if (inst->translationStarted()) {
         request = inst->savedRequest;
         assert(request);
@@ -3104,7 +3110,6 @@ LSQ::pushRequest(const DynInstPtr& inst, bool isLoad, uint8_t *data,
     if (request->isTranslationComplete()) {
         if (request->isMemAccessRequired()) {
             inst->effAddr = request->getVaddr();
-            inst->effSize = size;
             inst->effAddrValid(true);
 
             if (cpu->checker) {
